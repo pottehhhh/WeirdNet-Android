@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
+
       # ============================================================
       # 1. Checkout repository
       # ============================================================
@@ -27,7 +28,7 @@ jobs:
         uses: actions/checkout@v5
 
       # ============================================================
-      # 2. Extract Android project from ZIP
+      # 2. Extract Android project
       # ============================================================
       - name: Extract project
         shell: bash
@@ -49,18 +50,17 @@ jobs:
             echo "PROJECT_DIR=extracted/WeirdNet/WeirdNet" >> "$GITHUB_ENV"
 
           else
-            echo "ERROR: Could not locate settings.gradle.kts"
-            echo
-            echo "Found files:"
-            find extracted -maxdepth 5 -type f | sort
-            echo
-            echo "Searching for settings.gradle.kts:"
-            find extracted -name settings.gradle.kts -print
+            echo "ERROR: settings.gradle.kts not found."
+
+            find extracted \
+              -name settings.gradle.kts \
+              -print
+
             exit 1
           fi
 
           echo
-          echo "PROJECT_DIR:"
+          echo "Project directory:"
           grep "^PROJECT_DIR=" "$GITHUB_ENV"
 
       # ============================================================
@@ -73,10 +73,10 @@ jobs:
           java-version: "17"
 
       # ============================================================
-      # 4. Setup Gradle directly
+      # 4. Setup Gradle 8.7
       #
-      # The project ZIP does not contain gradlew or gradle-wrapper.jar.
-      # Therefore we intentionally install Gradle 8.7 directly.
+      # Project ZIP does not contain gradlew.
+      # Therefore Gradle is installed directly.
       # ============================================================
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -112,35 +112,16 @@ jobs:
           packages: ""
 
       # ============================================================
-      # 7. Verify Android SDK
-      # ============================================================
-      - name: Verify Android SDK toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-
-          command -v sdkmanager
-          sdkmanager --version
-
-      # ============================================================
-      # 8. Accept Android SDK licenses
-      # ============================================================
-      - name: Accept Android SDK licenses
-        shell: bash
-        run: |
-          set +o pipefail
-          yes | sdkmanager --licenses >/dev/null || true
-
-      # ============================================================
-      # 9. Install Android SDK 35
+      # 7. Install Android SDK 35
       # ============================================================
       - name: Install Android SDK 35
         shell: bash
         run: |
           set -euo pipefail
+
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          set -o pipefail
 
           sdkmanager \
             "platform-tools" \
@@ -148,9 +129,9 @@ jobs:
             "build-tools;35.0.0"
 
       # ============================================================
-      # 10. Verify Android SDK 35
+      # 8. Verify Android SDK
       # ============================================================
-      - name: Verify Android SDK 35
+      - name: Verify Android SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -158,12 +139,189 @@ jobs:
           test -d "$ANDROID_SDK_ROOT/platforms/android-35"
           test -d "$ANDROID_SDK_ROOT/build-tools/35.0.0"
 
-          echo "Android SDK 35 is installed successfully."
+          echo "Android SDK 35: OK"
+
+      # ============================================================
+      # 9. FIX SOURCE COMPILATION ERRORS
+      #
+      # These are actual source fixes found in the project:
+      #
+      # 1. WireGuard Statistics:
+      #    rx()/tx() -> peerRx()/peerTx()
+      #
+      # 2. Compose:
+      #    add androidx.compose.foundation.layout.padding
+      #
+      # 3. Accompanist:
+      #    add shouldShowRationale import
+      # ============================================================
+      - name: Fix Kotlin source compatibility
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WIREGUARD_FILE="app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt"
+          NAV_FILE="app/src/main/java/ir/weirdnet/client/ui/nav/WeirdNetNavHost.kt"
+          QR_FILE="app/src/main/java/ir/weirdnet/client/ui/qr/QrScanScreen.kt"
+
+          echo "Checking source files..."
+
+          test -f "$WIREGUARD_FILE"
+          test -f "$NAV_FILE"
+          test -f "$QR_FILE"
+
+          # ----------------------------------------------------------
+          # FIX 1: WireGuard Statistics API
+          # ----------------------------------------------------------
+
+          python3 - "$WIREGUARD_FILE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          old_rx = "totalRx += stats.rx(peer)"
+          old_tx = "totalTx += stats.tx(peer)"
+
+          new_rx = "totalRx += stats.peerRx(peer)"
+          new_tx = "totalTx += stats.peerTx(peer)"
+
+          if old_rx in text:
+              text = text.replace(old_rx, new_rx, 1)
+
+          if old_tx in text:
+              text = text.replace(old_tx, new_tx, 1)
+
+          if "stats.peerRx(peer)" not in text:
+              raise SystemExit(
+                  "ERROR: WireGuard peerRx() fix was not applied."
+              )
+
+          if "stats.peerTx(peer)" not in text:
+              raise SystemExit(
+                  "ERROR: WireGuard peerTx() fix was not applied."
+              )
+
+          path.write_text(text, encoding="utf-8")
+
+          print("WireGuard Statistics API: FIXED")
+          PY
+
+          # ----------------------------------------------------------
+          # FIX 2: Compose Modifier.padding import
+          # ----------------------------------------------------------
+
+          python3 - "$NAV_FILE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          required_import = (
+              "import androidx.compose.foundation.layout.padding"
+          )
+
+          if required_import not in text:
+              marker = "import androidx.compose.material.icons.Icons"
+
+              if marker in text:
+                  text = text.replace(
+                      marker,
+                      required_import + "\n" + marker,
+                      1
+                  )
+              else:
+                  raise SystemExit(
+                      "ERROR: Could not locate import section "
+                      "in WeirdNetNavHost.kt"
+                  )
+
+          if required_import not in text:
+              raise SystemExit(
+                  "ERROR: Compose padding import was not added."
+              )
+
+          path.write_text(text, encoding="utf-8")
+
+          print("Compose Modifier.padding import: FIXED")
+          PY
+
+          # ----------------------------------------------------------
+          # FIX 3: Accompanist shouldShowRationale import
+          # ----------------------------------------------------------
+
+          python3 - "$QR_FILE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          required_import = (
+              "import com.google.accompanist.permissions.shouldShowRationale"
+          )
+
+          if required_import not in text:
+              marker = (
+                  "import com.google.accompanist.permissions."
+                  "rememberPermissionState"
+              )
+
+              if marker in text:
+                  text = text.replace(
+                      marker,
+                      marker + "\n" + required_import,
+                      1
+                  )
+              else:
+                  raise SystemExit(
+                      "ERROR: Could not locate Accompanist "
+                      "permission imports."
+                  )
+
+          if required_import not in text:
+              raise SystemExit(
+                  "ERROR: shouldShowRationale import was not added."
+              )
+
+          path.write_text(text, encoding="utf-8")
+
+          print("Accompanist shouldShowRationale import: FIXED")
+          PY
+
+          echo
+          echo "All known Kotlin compatibility fixes applied."
+
+      # ============================================================
+      # 10. Show patched source snippets
+      # ============================================================
+      - name: Verify Kotlin fixes
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "================ WireGuard ================"
+          grep -n "peerRx\|peerTx" \
+            app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt
+
+          echo
+          echo "================ Navigation ==============="
+          grep -n "foundation.layout.padding" \
+            app/src/main/java/ir/weirdnet/client/ui/nav/WeirdNetNavHost.kt
+
+          echo
+          echo "================ QR Scanner ==============="
+          grep -n "shouldShowRationale" \
+            app/src/main/java/ir/weirdnet/client/ui/qr/QrScanScreen.kt
 
       # ============================================================
       # 11. Prepare app/libs
       # ============================================================
-      - name: Prepare app native libraries directory
+      - name: Prepare app native libraries
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -174,10 +332,8 @@ jobs:
           rm -f app/libs/libv2ray.aar
           rm -f app/libs/hev-socks5-tunnel.aar
 
-          echo "app/libs prepared."
-
       # ============================================================
-      # 12. Download Xray native AAR
+      # 12. Download Xray AAR
       # ============================================================
       - name: Download Xray native AAR
         working-directory: ${{ env.PROJECT_DIR }}
@@ -201,18 +357,8 @@ jobs:
 
       # ============================================================
       # 13. Prepare HEV source
-      #
-      # Official HEV Android build layout:
-      #
-      # hev-android/
-      # └── jni/
-      #     ├── Android.mk
-      #     ├── Application.mk
-      #     └── ...
-      #
-      # ndk-build runs from hev-android, not hev-android/jni.
       # ============================================================
-      - name: Prepare HEV source for Android NDK
+      - name: Prepare HEV source
         shell: bash
         run: |
           set -euo pipefail
@@ -236,9 +382,6 @@ jobs:
           echo "HEV commit:"
           git rev-parse HEAD
 
-          echo
-          echo "Checking HEV Android build files..."
-
           test -f Android.mk
           test -f Application.mk
 
@@ -261,11 +404,10 @@ jobs:
           test -x "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build"
 
           echo
-          echo "NDK version:"
           "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" --version
 
       # ============================================================
-      # 15. Build HEV native libraries
+      # 15. Build HEV
       # ============================================================
       - name: Build HEV native library
         working-directory: hev-android
@@ -273,26 +415,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "HEV Android build directory:"
+          test -d jni
+          test -f jni/Android.mk
+          test -f jni/Application.mk
+
+          echo "HEV build directory:"
           pwd
 
           echo
-          echo "Checking jni directory:"
-          test -d jni
-          ls -la jni
-
-          echo
-          echo "Cleaning HEV build..."
+          echo "Cleaning..."
           "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" clean
 
           echo
-          echo "Building HEV..."
+          echo "Building..."
           "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" \
             APP_MODULES=hev-socks5-tunnel \
             -j"$(nproc)"
 
           echo
-          echo "Checking generated libraries..."
+          echo "Checking libraries..."
 
           for abi in \
             armeabi-v7a \
@@ -301,15 +442,8 @@ jobs:
             x86_64
           do
             test -s "libs/$abi/libhev-socks5-tunnel.so"
-            echo "OK: libs/$abi/libhev-socks5-tunnel.so"
+            echo "OK: $abi"
           done
-
-          echo
-          echo "HEV native libraries:"
-          find libs \
-            -type f \
-            -name "libhev-socks5-tunnel.so" \
-            -print
 
       # ============================================================
       # 16. Package HEV AAR
@@ -354,13 +488,12 @@ jobs:
           test -s hev-socks5-tunnel.aar
 
           echo
-          echo "HEV AAR created:"
           ls -lh hev-socks5-tunnel.aar
 
       # ============================================================
-      # 17. Align minSdk with HEV
+      # 17. Align minSdk
       # ============================================================
-      - name: Align CI minSdk with HEV
+      - name: Align minSdk with HEV
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -373,24 +506,24 @@ jobs:
           text = path.read_text(encoding="utf-8")
 
           if "minSdk = 26" in text:
-              text = text.replace("minSdk = 26", "minSdk = 29", 1)
+              text = text.replace(
+                  "minSdk = 26",
+                  "minSdk = 29",
+                  1
+              )
 
           elif "minSdk = 29" not in text:
               raise SystemExit(
-                  "Could not find expected minSdk declaration "
-                  "in app/build.gradle.kts"
+                  "Could not find minSdk declaration."
               )
 
           path.write_text(text, encoding="utf-8")
 
-          print("CI minSdk is now 29")
+          print("minSdk = 29")
           PY
 
-          echo
-          grep -n "minSdk" app/build.gradle.kts
-
       # ============================================================
-      # 18. Copy HEV AAR into app
+      # 18. Copy HEV AAR
       # ============================================================
       - name: Copy HEV AAR into app
         working-directory: ${{ env.PROJECT_DIR }}
@@ -405,27 +538,29 @@ jobs:
           test -s app/libs/hev-socks5-tunnel.aar
 
           echo
-          echo "AAR files:"
           ls -lh app/libs/*.aar
 
       # ============================================================
-      # 19. Verify AAR contents
+      # 19. Suppress compileSdk warning
       # ============================================================
-      - name: Verify AAR contents
+      - name: Configure Android build properties
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "================ Xray AAR ================"
-          unzip -l app/libs/libv2ray.aar | head -60
+          if ! grep -q \
+            "^android.suppressUnsupportedCompileSdk=35" \
+            gradle.properties
+          then
+            printf '\nandroid.suppressUnsupportedCompileSdk=35\n' \
+              >> gradle.properties
+          fi
 
-          echo
-          echo "================ HEV AAR ================="
-          unzip -l app/libs/hev-socks5-tunnel.aar | head -60
+          echo "compileSdk 35 warning suppressed."
 
       # ============================================================
-      # 20. Verify Android project structure
+      # 20. Verify project
       # ============================================================
       - name: Verify Android project
         working-directory: ${{ env.PROJECT_DIR }}
@@ -437,22 +572,10 @@ jobs:
           test -f build.gradle.kts
           test -f app/build.gradle.kts
 
-          echo "Android project structure:"
-          find . \
-            -maxdepth 2 \
-            -type f \
-            \( \
-              -name "settings.gradle.kts" \
-              -o -name "build.gradle.kts" \
-            \) \
-            -print
+          echo "Android project structure: OK"
 
       # ============================================================
-      # 21. Clean Gradle project
-      #
-      # IMPORTANT:
-      # No ./gradlew here.
-      # We use the Gradle 8.7 executable installed above.
+      # 21. Clean
       # ============================================================
       - name: Clean project
         working-directory: ${{ env.PROJECT_DIR }}
@@ -512,15 +635,17 @@ jobs:
           test -n "$APK"
 
           echo
-          echo "APK generated successfully:"
-          ls -lh "$APK"
-
+          echo "========================================"
+          echo "WEIRDNET APK BUILD SUCCESSFUL"
+          echo "========================================"
           echo
-          echo "APK path:"
+          ls -lh "$APK"
+          echo
+          echo "APK:"
           echo "$APK"
 
       # ============================================================
-      # 25. Upload APK artifact
+      # 25. Upload APK
       # ============================================================
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
