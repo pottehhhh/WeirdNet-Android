@@ -1,436 +1,111 @@
 name: WEIRDNET Android Build
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+  push:
+    branches: [ main ]
 
-env:
-  ANDROID_PLATFORM: "35"
-  BUILD_TOOLS_VERSION: "35.0.0"
-  NDK_VERSION: "28.0.13004108"
-  HEV_VERSION: "2.17.1"
-  XRAY_VERSION: "v26.6.2"
+permissions:
+  contents: read
 
 jobs:
-  build-debug:
-    name: Build WEIRDNET Debug APK
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
-    permissions:
-      contents: read
+    env:
+      JAVA_VERSION: "17"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # 1) Extract ZIP and automatically locate the Android project
-      # ------------------------------------------------------------
-      - name: Extract Android project
+      - name: Extract project
         shell: bash
         run: |
-          set -euo pipefail
+          unzip -q "WeirdNet-Android-Project-GitHub-Build-Ready.zip" -d extracted
 
-          ZIP_FILE="WeirdNet-Android-Project-GitHub-Build-Ready.zip"
-          EXTRACT_DIR="${GITHUB_WORKSPACE}/extracted"
-
-          echo "Workspace:"
-          pwd
-
-          echo
-          echo "Repository files:"
-          find . -maxdepth 3 -type f -print | sort
-
-          echo
-          echo "Checking ZIP file..."
-
-          test -f "${ZIP_FILE}"
-
-          ls -lh "${ZIP_FILE}"
-
-          echo
-          echo "Testing ZIP integrity..."
-
-          unzip -t "${ZIP_FILE}"
-
-          echo
-          echo "Extracting ZIP..."
-
-          rm -rf "${EXTRACT_DIR}"
-          mkdir -p "${EXTRACT_DIR}"
-
-          unzip "${ZIP_FILE}" -d "${EXTRACT_DIR}"
-
-          echo
-          echo "Extracted files:"
-          find "${EXTRACT_DIR}" -maxdepth 6 -print | sort
-
-          echo
-          echo "Searching for Android project..."
-
-          PROJECT_DIR=""
-
-          while IFS= read -r SETTINGS_FILE; do
-            CANDIDATE_DIR="$(dirname "${SETTINGS_FILE}")"
-
-            echo "Candidate:"
-            echo "  ${CANDIDATE_DIR}"
-
-            if [ -f "${CANDIDATE_DIR}/gradlew" ] &&
-               [ -d "${CANDIDATE_DIR}/app" ]; then
-
-              PROJECT_DIR="${CANDIDATE_DIR}"
-              break
-            fi
-          done < <(
-            find "${EXTRACT_DIR}" \
-              -type f \
-              \( \
-                -name "settings.gradle.kts" \
-                -o \
-                -name "settings.gradle" \
-              \) \
-              -print
-          )
-
-          if [ -z "${PROJECT_DIR}" ]; then
-            echo
-            echo "ERROR: Android project root was not found."
-            echo
-            echo "All settings files:"
-            find "${EXTRACT_DIR}" \
-              -type f \
-              \( \
-                -name "settings.gradle.kts" \
-                -o \
-                -name "settings.gradle" \
-              \) \
-              -print \
-              | sort
-
-            echo
-            echo "All Gradle wrappers:"
-            find "${EXTRACT_DIR}" \
-              -type f \
-              -name "gradlew" \
-              -print \
-              | sort
-
-            echo
-            echo "All app directories:"
-            find "${EXTRACT_DIR}" \
-              -type d \
-              -name "app" \
-              -print \
-              | sort
-
+          if [ -f extracted/WeirdNet/settings.gradle.kts ]; then
+            echo "PROJECT_DIR=extracted/WeirdNet" >> $GITHUB_ENV
+          elif [ -f extracted/WeirdNet/WeirdNet/settings.gradle.kts ]; then
+            echo "PROJECT_DIR=extracted/WeirdNet/WeirdNet" >> $GITHUB_ENV
+          else
+            echo "settings.gradle.kts not found"
+            find extracted -name settings.gradle.kts
             exit 1
           fi
 
-          echo
-          echo "Android project found:"
-          echo "${PROJECT_DIR}"
-
-          test -f "${PROJECT_DIR}/gradlew"
-          test -d "${PROJECT_DIR}/app"
-
-          echo "PROJECT_DIR=${PROJECT_DIR}" >> "${GITHUB_ENV}"
-
-      # ------------------------------------------------------------
-      # 2) Java
-      # ------------------------------------------------------------
-      - name: Set up Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
 
-      # ------------------------------------------------------------
-      # 3) Android SDK
-      # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK components
+      - name: Install required SDK packages
         shell: bash
         run: |
-          set -euo pipefail
-
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          yes | sdkmanager --licenses >/dev/null || true
 
           sdkmanager \
             "platform-tools" \
-            "platforms;android-${ANDROID_PLATFORM}" \
-            "build-tools;${BUILD_TOOLS_VERSION}" \
-            "ndk;${NDK_VERSION}"
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
-      # ------------------------------------------------------------
-      # 4) Prepare Gradle project
-      # ------------------------------------------------------------
-      - name: Prepare Gradle project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Project directory:"
-          echo "${PROJECT_DIR}"
-
-          test -d "${PROJECT_DIR}"
-          test -f "${PROJECT_DIR}/gradlew"
-          test -f "${PROJECT_DIR}/settings.gradle.kts" ||
-            test -f "${PROJECT_DIR}/settings.gradle"
-          test -d "${PROJECT_DIR}/app"
-
-          chmod +x "${PROJECT_DIR}/gradlew"
-
-          mkdir -p "${PROJECT_DIR}/app/libs"
-
-          echo
-          echo "Gradle version:"
-          cd "${PROJECT_DIR}"
-          ./gradlew --version
-
-      # ------------------------------------------------------------
-      # 5) Download Xray Android AAR
-      # ------------------------------------------------------------
-      - name: Download Xray native AAR
-        shell: bash
+      - name: Download Xray AAR
+        working-directory: ${{ env.PROJECT_DIR }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          mkdir -p app/libs
 
-          mkdir -p "${PROJECT_DIR}/app/libs"
-
-          echo "Downloading Xray ${XRAY_VERSION}..."
-
-          gh release download "${XRAY_VERSION}" \
+          gh release download v26.6.2 \
             --repo 2dust/AndroidLibXrayLite \
             --pattern "libv2ray.aar" \
-            --dir "${PROJECT_DIR}/app/libs" \
+            --dir app/libs \
             --clobber
 
-          test -s "${PROJECT_DIR}/app/libs/libv2ray.aar"
-
-          echo
-          echo "Xray AAR:"
-          ls -lh "${PROJECT_DIR}/app/libs/libv2ray.aar"
-
-      # ------------------------------------------------------------
-      # 6) Clone HEV
-      # ------------------------------------------------------------
-      - name: Clone HEV source
-        shell: bash
+      - name: Download HEV AAR
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          mkdir -p app/libs
 
-          rm -rf "${GITHUB_WORKSPACE}/hev-socks5-tunnel"
+          gh release download 2.15.0 \
+            --repo heiher/hev-socks5-tunnel \
+            --pattern "hev-socks5-tunnel.aar" \
+            --dir app/libs \
+            --clobber
 
-          git clone \
-            --depth 1 \
-            --branch "${HEV_VERSION}" \
-            --recurse-submodules \
-            https://github.com/heiher/hev-socks5-tunnel.git \
-            "${GITHUB_WORKSPACE}/hev-socks5-tunnel"
-
-          test -f "${GITHUB_WORKSPACE}/hev-socks5-tunnel/Android.mk"
-          test -f "${GITHUB_WORKSPACE}/hev-socks5-tunnel/Application.mk"
-
-          echo
-          echo "HEV source prepared:"
-          git -C "${GITHUB_WORKSPACE}/hev-socks5-tunnel" describe --tags --always
-
-      # ------------------------------------------------------------
-      # 7) Build HEV native Android libraries
-      # ------------------------------------------------------------
-      - name: Build HEV Android shared library
-        shell: bash
+      - name: Verify native libraries
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          set -euo pipefail
+          test -s app/libs/libv2ray.aar
+          test -s app/libs/hev-socks5-tunnel.aar
+          ls -lh app/libs
 
-          export NDK_HOME="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+      - name: Make Gradle executable
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: chmod +x gradlew
 
-          echo "NDK:"
-          echo "${NDK_HOME}"
+      - name: Gradle clean
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: ./gradlew --no-daemon clean
 
-          test -x "${NDK_HOME}/ndk-build"
-
-          cd "${GITHUB_WORKSPACE}/hev-socks5-tunnel"
-
-          "${NDK_HOME}/ndk-build" \
-            NDK_PROJECT_PATH="${GITHUB_WORKSPACE}/hev-socks5-tunnel" \
-            APP_BUILD_SCRIPT="${GITHUB_WORKSPACE}/hev-socks5-tunnel/Android.mk" \
-            NDK_APPLICATION_MK="${GITHUB_WORKSPACE}/hev-socks5-tunnel/Application.mk" \
-            APP_ABI="armeabi-v7a arm64-v8a x86 x86_64"
-
-          echo
-          echo "HEV build output:"
-          find "${GITHUB_WORKSPACE}/hev-socks5-tunnel/libs" \
-            -maxdepth 2 \
-            -type f \
-            -print \
-            | sort
-
-          test -s \
-            "${GITHUB_WORKSPACE}/hev-socks5-tunnel/libs/armeabi-v7a/libhev-socks5-tunnel.so"
-
-          test -s \
-            "${GITHUB_WORKSPACE}/hev-socks5-tunnel/libs/arm64-v8a/libhev-socks5-tunnel.so"
-
-          test -s \
-            "${GITHUB_WORKSPACE}/hev-socks5-tunnel/libs/x86/libhev-socks5-tunnel.so"
-
-          test -s \
-            "${GITHUB_WORKSPACE}/hev-socks5-tunnel/libs/x86_64/libhev-socks5-tunnel.so"
-
-      # ------------------------------------------------------------
-      # 8) Package HEV .so files as an AAR
-      # ------------------------------------------------------------
-      - name: Package HEV into AAR
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          HEV_ROOT="${GITHUB_WORKSPACE}/hev-socks5-tunnel"
-          AAR_ROOT="${GITHUB_WORKSPACE}/hev-aar"
-          HEV_AAR="${PROJECT_DIR}/app/libs/hev-socks5-tunnel.aar"
-
-          rm -rf "${AAR_ROOT}"
-
-          mkdir -p "${AAR_ROOT}/jni/armeabi-v7a"
-          mkdir -p "${AAR_ROOT}/jni/arm64-v8a"
-          mkdir -p "${AAR_ROOT}/jni/x86"
-          mkdir -p "${AAR_ROOT}/jni/x86_64"
-          mkdir -p "${AAR_ROOT}/empty-classes"
-
-          cp \
-            "${HEV_ROOT}/libs/armeabi-v7a/libhev-socks5-tunnel.so" \
-            "${AAR_ROOT}/jni/armeabi-v7a/"
-
-          cp \
-            "${HEV_ROOT}/libs/arm64-v8a/libhev-socks5-tunnel.so" \
-            "${AAR_ROOT}/jni/arm64-v8a/"
-
-          cp \
-            "${HEV_ROOT}/libs/x86/libhev-socks5-tunnel.so" \
-            "${AAR_ROOT}/jni/x86/"
-
-          cp \
-            "${HEV_ROOT}/libs/x86_64/libhev-socks5-tunnel.so" \
-            "${AAR_ROOT}/jni/x86_64/"
-
-          cat > "${AAR_ROOT}/AndroidManifest.xml" <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-sdk android:minSdkVersion="29" />
-          </manifest>
-          EOF
-
-          (
-            cd "${AAR_ROOT}/empty-classes"
-            jar cf "${AAR_ROOT}/classes.jar" .
-          )
-
-          rm -rf "${AAR_ROOT}/empty-classes"
-
-          (
-            cd "${AAR_ROOT}"
-
-            zip -q -r \
-              "${HEV_AAR}" \
-              AndroidManifest.xml \
-              classes.jar \
-              jni
-          )
-
-          test -s "${HEV_AAR}"
-
-          echo
-          echo "HEV AAR created:"
-          ls -lh "${HEV_AAR}"
-
-      # ------------------------------------------------------------
-      # 9) Verify native artifacts
-      # ------------------------------------------------------------
-      - name: Verify native artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          XRAY_AAR="${PROJECT_DIR}/app/libs/libv2ray.aar"
-          HEV_AAR="${PROJECT_DIR}/app/libs/hev-socks5-tunnel.aar"
-
-          test -s "${XRAY_AAR}"
-          test -s "${HEV_AAR}"
-
-          echo "Testing Xray AAR..."
-          unzip -t "${XRAY_AAR}" >/dev/null
-
-          echo "Testing HEV AAR..."
-          unzip -t "${HEV_AAR}" >/dev/null
-
-          echo
-          echo "Native artifacts:"
-          ls -lh "${PROJECT_DIR}/app/libs/"*.aar
-
-          echo
-          echo "HEV AAR contents:"
-          unzip -l "${HEV_AAR}"
-
-      # ------------------------------------------------------------
-      # 10) Unit tests
-      # ------------------------------------------------------------
       - name: Run unit tests
-        shell: bash
-        run: |
-          set -euo pipefail
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
 
-          cd "${PROJECT_DIR}"
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: ./gradlew --no-daemon :app:assembleDebug
 
-          ./gradlew \
-            --no-daemon \
-            clean \
-            :app:testDebugUnitTest
-
-      # ------------------------------------------------------------
-      # 11) Build APK
-      # ------------------------------------------------------------
-      - name: Assemble debug APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "${PROJECT_DIR}"
-
-          ./gradlew \
-            --no-daemon \
-            :app:assembleDebug
-
-      # ------------------------------------------------------------
-      # 12) Verify APK
-      # ------------------------------------------------------------
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK_PATH="${PROJECT_DIR}/app/build/outputs/apk/debug/app-debug.apk"
-
-          test -s "${APK_PATH}"
-
-          echo
-          echo "APK successfully built:"
-          ls -lh "${APK_PATH}"
-
-      # ------------------------------------------------------------
-      # 13) Upload APK
-      # ------------------------------------------------------------
-      - name: Upload debug APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: weirdnet-debug-apk
+          name: WeirdNet-Debug-APK
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
