@@ -15,25 +15,25 @@ env:
 
 jobs:
   build:
-    name: Build WEIRDNET APK
+    name: Build WEIRDNET Android
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up JDK 17
+      - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: ""
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -43,38 +43,12 @@ jobs:
           sdkmanager "build-tools;35.0.0"
           sdkmanager "ndk;27.0.12077973"
 
-      - name: Show Android tool versions
+      - name: Extract project
         shell: bash
         run: |
           set -euo pipefail
 
-          java -version
-          adb version
-          sdkmanager --version
-          "$ANDROID_HOME/ndk/27.0.12077973/ndk-build" --version
-
-      - name: Locate Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Repository:"
-          pwd
-
-          echo
-          echo "Top-level files:"
-          find . -maxdepth 2 -type f | sort | head -200
-
-          echo
-          echo "Gradle projects:"
-          find . -maxdepth 5 -name settings.gradle -o -name settings.gradle.kts
-
-      - name: Extract project ZIP if needed
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -d "WeirdNet" ] && [ -f "WeirdNet/settings.gradle.kts" ]; then
+          if [ -d "WeirdNet" ]; then
             echo "WeirdNet directory already exists."
             exit 0
           fi
@@ -82,25 +56,17 @@ jobs:
           ZIP="$(find . -maxdepth 3 -type f -name '*.zip' | head -1 || true)"
 
           if [ -z "$ZIP" ]; then
-            echo "No project ZIP found."
-            exit 0
+            echo "ERROR: No project ZIP found."
+            exit 1
           fi
-
-          echo "Using project ZIP: $ZIP"
 
           mkdir -p extracted
           unzip -q "$ZIP" -d extracted
 
-          echo
-          echo "Extracted project:"
-          find extracted -maxdepth 3 -type f | sort | head -200
-
-      - name: Find Android project root
+      - name: Set project root
         shell: bash
         run: |
           set -euo pipefail
-
-          PROJECT_ROOT=""
 
           if [ -f "WeirdNet/settings.gradle.kts" ]; then
             PROJECT_ROOT="WeirdNet"
@@ -109,33 +75,31 @@ jobs:
           elif [ -f "extracted/WeirdNet/settings.gradle.kts" ]; then
             PROJECT_ROOT="extracted/WeirdNet"
           else
-            FOUND="$(find . -type f -name settings.gradle.kts -print -quit || true)"
+            SETTINGS_FILE="$(find . -type f -name settings.gradle.kts -print -quit)"
 
-            if [ -n "$FOUND" ]; then
-              PROJECT_ROOT="$(dirname "$FOUND")"
+            if [ -z "$SETTINGS_FILE" ]; then
+              echo "ERROR: settings.gradle.kts not found."
+              exit 1
             fi
-          fi
 
-          if [ -z "$PROJECT_ROOT" ]; then
-            echo "Could not find Android Gradle project."
-            exit 1
+            PROJECT_ROOT="$(dirname "$SETTINGS_FILE")"
           fi
 
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
-          echo "Android project root: $PROJECT_ROOT"
+          echo "Using project: $PROJECT_ROOT"
 
-      - name: Patch WireGuard traffic API
+      # Run #12 failed here:
+      # WireGuardEngine.kt:
+      # Unresolved reference 'peerRx'
+      # Unresolved reference 'peerTx'
+      #
+      # Use the aggregate Statistics API instead.
+      - name: Fix WireGuard traffic API
         shell: bash
         run: |
           set -euo pipefail
 
           FILE="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt"
-
-          if [ ! -f "$FILE" ]; then
-            echo "WireGuardEngine.kt not found:"
-            echo "$FILE"
-            exit 1
-          fi
 
           python - "$FILE" <<'PY'
           from pathlib import Path
@@ -144,54 +108,43 @@ jobs:
           p = Path(sys.argv[1])
           s = p.read_text()
 
-          old_blocks = [
-              """var totalRx = 0L
+          old_peer_api = """var totalRx = 0L
           var totalTx = 0L
           for (peer in stats.peers()) {
               totalRx += stats.peerRx(peer)
               totalTx += stats.peerTx(peer)
-          }""",
+          }"""
 
-              """var totalRx = 0L
+          old_old_api = """var totalRx = 0L
           var totalTx = 0L
           for (peer in stats.peers()) {
               totalRx += stats.rx(peer)
               totalTx += stats.tx(peer)
           }"""
-          ]
 
-          new_block = """val totalRx = stats.totalRx()
+          new_api = """val totalRx = stats.totalRx()
           val totalTx = stats.totalTx()"""
 
-          changed = False
-
-          for old in old_blocks:
-              if old in s:
-                  s = s.replace(old, new_block)
-                  changed = True
-
-          if not changed:
-              if "stats.peerRx(peer)" in s or "stats.peerTx(peer)" in s:
-                  s = s.replace("stats.peerRx(peer)", "stats.totalRx()")
-                  s = s.replace("stats.peerTx(peer)", "stats.totalTx()")
-                  changed = True
-
-          if not changed:
-              if "stats.rx(peer)" in s or "stats.tx(peer)" in s:
-                  s = s.replace("stats.rx(peer)", "stats.totalRx()")
-                  s = s.replace("stats.tx(peer)", "stats.totalTx()")
-                  changed = True
+          if old_peer_api in s:
+              s = s.replace(old_peer_api, new_api)
+              print("Replaced peerRx/peerTx API.")
+          elif old_old_api in s:
+              s = s.replace(old_old_api, new_api)
+              print("Replaced old rx/tx API.")
+          else:
+              s = s.replace("stats.peerRx(peer)", "stats.totalRx()")
+              s = s.replace("stats.peerTx(peer)", "stats.totalTx()")
+              s = s.replace("stats.rx(peer)", "stats.totalRx()")
+              s = s.replace("stats.tx(peer)", "stats.totalTx()")
+              print("Applied fallback API replacement.")
 
           p.write_text(s)
-
-          print("Patched:", p)
           PY
 
-          echo
-          echo "Current traffic implementation:"
-          grep -n -A15 -B3 "currentTraffic" "$FILE"
+          echo "WireGuard traffic code:"
+          grep -n -A12 -B3 "currentTraffic" "$FILE"
 
-      - name: Patch missing Compose padding import
+      - name: Fix missing Compose padding import
         shell: bash
         run: |
           set -euo pipefail
@@ -199,7 +152,6 @@ jobs:
           FILE="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/ui/WeirdNetNavHost.kt"
 
           if [ ! -f "$FILE" ]; then
-            echo "NavHost file not found; skipping."
             exit 0
           fi
 
@@ -210,26 +162,28 @@ jobs:
           p = Path(sys.argv[1])
           s = p.read_text()
 
+          if "Modifier.padding(" not in s:
+              raise SystemExit(0)
+
           imp = "import androidx.compose.foundation.layout.padding"
 
-          if imp not in s and "Modifier.padding(" in s:
+          if imp not in s:
               lines = s.splitlines()
 
-              insert_at = 0
+              last_import = 0
               for i, line in enumerate(lines):
                   if line.startswith("import "):
-                      insert_at = i + 1
+                      last_import = i
 
-              lines.insert(insert_at, imp)
-              s = "\n".join(lines) + ("\n" if s.endswith("\n") else "")
-              p.write_text(s)
+              lines.insert(last_import + 1, imp)
+              p.write_text("\n".join(lines) + "\n")
 
-              print("Added padding import.")
+              print("Added Compose padding import.")
           else:
-              print("Padding import already present or not required.")
+              print("Padding import already exists.")
           PY
 
-      - name: Patch Accompanist rationale import
+      - name: Fix Accompanist rationale import
         shell: bash
         run: |
           set -euo pipefail
@@ -237,7 +191,6 @@ jobs:
           FILE="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/ui/screens/QrScanScreen.kt"
 
           if [ ! -f "$FILE" ]; then
-            echo "QrScanScreen.kt not found; skipping."
             exit 0
           fi
 
@@ -249,7 +202,6 @@ jobs:
           s = p.read_text()
 
           if "shouldShowRationale" not in s:
-              print("shouldShowRationale is not used.")
               raise SystemExit(0)
 
           imp = "import com.google.accompanist.permissions.shouldShowRationale"
@@ -257,52 +209,49 @@ jobs:
           if imp not in s:
               lines = s.splitlines()
 
-              insert_at = 0
+              last_import = 0
               for i, line in enumerate(lines):
                   if line.startswith("import "):
-                      insert_at = i + 1
+                      last_import = i
 
-              lines.insert(insert_at, imp)
-              s = "\n".join(lines) + ("\n" if s.endswith("\n") else "")
-              p.write_text(s)
+              lines.insert(last_import + 1, imp)
+              p.write_text("\n".join(lines) + "\n")
 
               print("Added shouldShowRationale import.")
           else:
-              print("Rationale import already present.")
+              print("Rationale import already exists.")
           PY
 
-      - name: Verify source patches
+      - name: Verify WireGuard fix
         shell: bash
         run: |
           set -euo pipefail
 
-          WG="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt"
+          FILE="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt"
 
-          echo "Checking WireGuard API..."
-
-          if grep -n "peerRx(peer)" "$WG"; then
+          if grep -q "peerRx(peer)" "$FILE"; then
             echo "ERROR: peerRx(peer) still exists."
             exit 1
           fi
 
-          if grep -n "peerTx(peer)" "$WG"; then
+          if grep -q "peerTx(peer)" "$FILE"; then
             echo "ERROR: peerTx(peer) still exists."
             exit 1
           fi
 
-          if ! grep -n "stats.totalRx()" "$WG"; then
-            echo "ERROR: stats.totalRx() not found."
+          if ! grep -q "stats.totalRx()" "$FILE"; then
+            echo "ERROR: totalRx() not found."
             exit 1
           fi
 
-          if ! grep -n "stats.totalTx()" "$WG"; then
-            echo "ERROR: stats.totalTx() not found."
+          if ! grep -q "stats.totalTx()" "$FILE"; then
+            echo "ERROR: totalTx() not found."
             exit 1
           fi
 
-          echo "WireGuard traffic API patch verified."
+          echo "WireGuard API fix verified."
 
-      - name: Download Xray Android library
+      - name: Download Xray AAR
         shell: bash
         run: |
           set -euo pipefail
@@ -317,12 +266,13 @@ jobs:
 
           ls -lh "$PROJECT_ROOT/app/libs/AndroidLibXrayLite.aar"
 
-      - name: Build HEV SOCKS5 tunnel
+      - name: Build HEV
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf hev-android
+
           mkdir -p hev-android
 
           git clone \
@@ -349,85 +299,72 @@ jobs:
             NDK_APPLICATION_MK="$PWD/jni/Application.mk" \
             V=1
 
-          echo
-          echo "HEV build outputs:"
+          echo "HEV native libraries:"
           find . -type f \
-            \( -name '*.so' -o -name '*.a' \) \
-            -print | sort
+            \( -name "*.so" -o -name "*.a" \) \
+            -print
 
       - name: Package HEV AAR
         shell: bash
         run: |
           set -euo pipefail
 
-          HEV_AAR="$PROJECT_ROOT/app/libs/hev-socks5-tunnel.aar"
-
           rm -rf hev-aar
           mkdir -p hev-aar/jni
 
-          find hev-android \
-            -type f \
-            -name '*.so' \
-            -print
+          FOUND=0
 
-          found=0
-
-          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
-            SRC="$(find hev-android -type f -path "*/libs/$abi/*.so" -o -type f -path "*/obj/local/$abi/*.so" | head -1 || true)"
+          for ABI in armeabi-v7a arm64-v8a x86 x86_64; do
+            SRC="$(find hev-android \
+              -type f \
+              \( -path "*/libs/$ABI/*.so" -o -path "*/obj/local/$ABI/*.so" \) \
+              -print -quit || true)"
 
             if [ -n "$SRC" ]; then
-              mkdir -p "hev-aar/jni/$abi"
-              cp "$SRC" "hev-aar/jni/$abi/"
-              found=1
+              mkdir -p "hev-aar/jni/$ABI"
+              cp "$SRC" "hev-aar/jni/$ABI/"
+              FOUND=1
             fi
           done
 
-          if [ "$found" -ne 1 ]; then
-            echo "ERROR: No HEV shared libraries were found."
-            find hev-android -type f | sort | head -300
+          if [ "$FOUND" -eq 0 ]; then
+            echo "ERROR: HEV .so files not found."
+            find hev-android -type f | sort
             exit 1
           fi
 
           cd hev-aar
-          zip -qr "../hev-socks5-tunnel.aar" .
+          zip -qr ../hev-socks5-tunnel.aar .
           cd ..
 
-          cp hev-socks5-tunnel.aar "$HEV_AAR"
+          cp hev-socks5-tunnel.aar \
+            "$PROJECT_ROOT/app/libs/hev-socks5-tunnel.aar"
 
-          echo
-          echo "HEV AAR:"
-          ls -lh "$HEV_AAR"
+          ls -lh "$PROJECT_ROOT/app/libs/hev-socks5-tunnel.aar"
 
-      - name: Configure Android build
+      - name: Configure Gradle
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$PROJECT_ROOT/gradle"
+          touch "$PROJECT_ROOT/gradle.properties"
 
-          PROPS="$PROJECT_ROOT/gradle.properties"
+          if ! grep -q \
+            "^android.suppressUnsupportedCompileSdk=35$" \
+            "$PROJECT_ROOT/gradle.properties"; then
 
-          touch "$PROPS"
-
-          if ! grep -q "^android.suppressUnsupportedCompileSdk=35$" "$PROPS"; then
-            echo "android.suppressUnsupportedCompileSdk=35" >> "$PROPS"
+            echo "android.suppressUnsupportedCompileSdk=35" \
+              >> "$PROJECT_ROOT/gradle.properties"
           fi
 
-          echo
-          echo "gradle.properties:"
-          cat "$PROPS"
-
-      - name: Set up Gradle 8.7
+      - name: Setup Gradle 8.7
         uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: ${{ env.GRADLE_VERSION }}
+          gradle-version: "8.7"
 
-      - name: Show Gradle version
+      - name: Gradle version
         working-directory: ${{ env.PROJECT_ROOT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gradle --version
+        run: gradle --version
 
       - name: Run unit tests
         working-directory: ${{ env.PROJECT_ROOT }}
@@ -451,32 +388,10 @@ jobs:
             --stacktrace \
             :app:assembleDebug
 
-      - name: Locate APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "APK files:"
-          find "$PROJECT_ROOT/app/build/outputs" \
-            -type f \
-            \( -name '*.apk' -o -name '*.aab' \) \
-            -print
-
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: WeirdNet-Debug-APK
-          path: |
-            ${{ env.PROJECT_ROOT }}/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_ROOT }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
-
-      - name: Upload build reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: WeirdNet-Build-Reports
-          path: |
-            ${{ env.PROJECT_ROOT }}/app/build/reports/**
-          if-no-files-found: warn
-          retention-days: 7
