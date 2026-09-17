@@ -1,13 +1,21 @@
 name: WEIRDNET Android Build
 
 on:
-  workflow_dispatch:
   push:
     branches:
-      - "main"
+      - main
+  workflow_dispatch:
+
+env:
+  ANDROID_PLATFORM: "35"
+  BUILD_TOOLS_VERSION: "35.0.0"
+  NDK_VERSION: "28.0.13004108"
+  HEV_VERSION: "2.17.1"
+  XRAY_VERSION: "v26.6.2"
 
 jobs:
   build-debug:
+    name: Build WEIRDNET Debug APK
     runs-on: ubuntu-latest
 
     permissions:
@@ -17,154 +25,239 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract main project
+      - name: Extract Android project
+        shell: bash
         run: |
-          unzip -q "WeirdNet-Android-Project-GitHub-Build-Ready.zip" -d extracted
+          set -euo pipefail
+
+          rm -rf extracted
+
+          unzip -q \
+            "WeirdNet-Android-Project-GitHub-Build-Ready.zip" \
+            -d extracted
+
           test -f "extracted/WeirdNet/settings.gradle.kts"
+          test -f "extracted/WeirdNet/gradlew"
+          test -d "extracted/WeirdNet/app"
+
+          echo "Android project found successfully."
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
+      - name: Install Android SDK components
+        shell: bash
         run: |
+          set -euo pipefail
+
           yes | sdkmanager --licenses >/dev/null || true
 
-      - name: Install Android SDK 35
-        run: |
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_PLATFORM}" \
+            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "ndk;${NDK_VERSION}"
 
-      - name: Download pinned Xray native AAR
+      - name: Prepare Gradle project
         working-directory: extracted/WeirdNet
+        shell: bash
         run: |
+          set -euo pipefail
+
+          chmod +x gradlew
+
           mkdir -p app/libs
 
-          gh release download v26.6.2 \
+          echo "Gradle version:"
+          ./gradlew --version
+
+      - name: Download Xray native AAR
+        working-directory: extracted/WeirdNet
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/libs
+
+          gh release download "${XRAY_VERSION}" \
             --repo 2dust/AndroidLibXrayLite \
             --pattern "libv2ray.aar" \
             --dir app/libs \
             --clobber
 
-        env:
-          GH_TOKEN: ${{ github.token }}
+          test -s app/libs/libv2ray.aar
 
-      - name: Download pinned HEV native AAR
-        working-directory: extracted/WeirdNet
+          echo "Xray AAR:"
+          ls -lh app/libs/libv2ray.aar
+
+      - name: Clone HEV source
+        shell: bash
         run: |
-          mkdir -p app/libs
+          set -euo pipefail
 
-          curl -fL --retry 3 \
-            -o app/libs/hev-socks5-tunnel.aar \
-            "https://github.com/heiher/hev-socks5-tunnel/releases/download/2.17.1/hev-socks5-tunnel.aar"
+          rm -rf hev-socks5-tunnel
 
-        env:
-          GH_TOKEN: ${{ github.token }}
+          git clone \
+            --depth 1 \
+            --branch "${HEV_VERSION}" \
+            --recurse-submodules \
+            https://github.com/heiher/hev-socks5-tunnel.git \
+            hev-socks5-tunnel
+
+          test -f hev-socks5-tunnel/Android.mk
+          test -f hev-socks5-tunnel/Application.mk
+
+          echo "HEV source prepared:"
+          git -C hev-socks5-tunnel describe --tags --always
+
+      - name: Build HEV Android shared library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export NDK_HOME="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+
+          test -x "${NDK_HOME}/ndk-build"
+
+          "${NDK_HOME}/ndk-build" \
+            NDK_PROJECT_PATH="${GITHUB_WORKSPACE}/hev-socks5-tunnel" \
+            APP_BUILD_SCRIPT="${GITHUB_WORKSPACE}/hev-socks5-tunnel/Android.mk" \
+            NDK_APPLICATION_MK="${GITHUB_WORKSPACE}/hev-socks5-tunnel/Application.mk" \
+            APP_ABI="armeabi-v7a arm64-v8a x86 x86_64"
+
+          echo "HEV build output:"
+          find hev-socks5-tunnel/libs -maxdepth 2 -type f -print | sort
+
+          test -s "hev-socks5-tunnel/libs/armeabi-v7a/libhev-socks5-tunnel.so"
+          test -s "hev-socks5-tunnel/libs/arm64-v8a/libhev-socks5-tunnel.so"
+          test -s "hev-socks5-tunnel/libs/x86/libhev-socks5-tunnel.so"
+          test -s "hev-socks5-tunnel/libs/x86_64/libhev-socks5-tunnel.so"
+
+      - name: Package HEV into AAR
+        working-directory: extracted/WeirdNet
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HEV_ROOT="${GITHUB_WORKSPACE}/hev-socks5-tunnel"
+          AAR_ROOT="${GITHUB_WORKSPACE}/hev-aar"
+
+          rm -rf "${AAR_ROOT}"
+          mkdir -p "${AAR_ROOT}/jni/armeabi-v7a"
+          mkdir -p "${AAR_ROOT}/jni/arm64-v8a"
+          mkdir -p "${AAR_ROOT}/jni/x86"
+          mkdir -p "${AAR_ROOT}/jni/x86_64"
+          mkdir -p "${AAR_ROOT}/empty-classes"
+
+          cp \
+            "${HEV_ROOT}/libs/armeabi-v7a/libhev-socks5-tunnel.so" \
+            "${AAR_ROOT}/jni/armeabi-v7a/"
+
+          cp \
+            "${HEV_ROOT}/libs/arm64-v8a/libhev-socks5-tunnel.so" \
+            "${AAR_ROOT}/jni/arm64-v8a/"
+
+          cp \
+            "${HEV_ROOT}/libs/x86/libhev-socks5-tunnel.so" \
+            "${AAR_ROOT}/jni/x86/"
+
+          cp \
+            "${HEV_ROOT}/libs/x86_64/libhev-socks5-tunnel.so" \
+            "${AAR_ROOT}/jni/x86_64/"
+
+          cat > "${AAR_ROOT}/AndroidManifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-sdk android:minSdkVersion="29" />
+          </manifest>
+          EOF
+
+          (
+            cd "${AAR_ROOT}/empty-classes"
+            jar cf "${AAR_ROOT}/classes.jar" .
+          )
+
+          rm -rf "${AAR_ROOT}/empty-classes"
+
+          (
+            cd "${AAR_ROOT}"
+            zip -q -r \
+              "${GITHUB_WORKSPACE}/extracted/WeirdNet/app/libs/hev-socks5-tunnel.aar" \
+              AndroidManifest.xml \
+              classes.jar \
+              jni
+          )
+
+          test -s app/libs/hev-socks5-tunnel.aar
+
+          echo "HEV AAR created:"
+          ls -lh app/libs/hev-socks5-tunnel.aar
 
       - name: Verify native artifacts
         working-directory: extracted/WeirdNet
+        shell: bash
         run: |
+          set -euo pipefail
+
           test -s app/libs/libv2ray.aar
           test -s app/libs/hev-socks5-tunnel.aar
 
-          echo "Checking HEV AAR archive..."
-          unzip -t app/libs/hev-socks5-tunnel.aar >/dev/null
-
-          echo "Checking Xray AAR archive..."
+          echo "Testing Xray AAR..."
           unzip -t app/libs/libv2ray.aar >/dev/null
 
-          echo "Native AAR files:"
+          echo "Testing HEV AAR..."
+          unzip -t app/libs/hev-socks5-tunnel.aar >/dev/null
+
+          echo
+          echo "Native artifacts:"
           ls -lh app/libs/*.aar
 
-      - name: Make Gradle wrapper executable
-        working-directory: extracted/WeirdNet
-        run: chmod +x gradlew
+          echo
+          echo "HEV AAR contents:"
+          unzip -l app/libs/hev-socks5-tunnel.aar
 
-      - name: Clean and run unit tests
+      - name: Run unit tests
         working-directory: extracted/WeirdNet
+        shell: bash
         run: |
-          ./gradlew --no-daemon clean :app:testDebugUnitTest
+          set -euo pipefail
+
+          ./gradlew \
+            --no-daemon \
+            clean \
+            :app:testDebugUnitTest
 
       - name: Assemble debug APK
         working-directory: extracted/WeirdNet
+        shell: bash
         run: |
-          ./gradlew --no-daemon :app:assembleDebug
+          set -euo pipefail
 
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: weirdnet-debug-apk
-          path: extracted/WeirdNet/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          ./gradlew \
+            --no-daemon \
+            :app:assembleDebug
 
-      - name: Accept Android SDK licenses
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-
-      - name: Install Android SDK 35
-        run: |
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
-
-      - name: Download pinned Xray native AAR
+      - name: Verify APK
         working-directory: extracted/WeirdNet
+        shell: bash
         run: |
-          mkdir -p app/libs
+          set -euo pipefail
 
-          gh release download v26.6.2 \
-            --repo 2dust/AndroidLibXrayLite \
-            --pattern "libv2ray.aar" \
-            --dir app/libs \
-            --clobber
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
 
-        env:
-          GH_TOKEN: ${{ github.token }}
+          test -s "${APK_PATH}"
 
-      - name: Download pinned HEV native AAR
-        working-directory: extracted/WeirdNet
-        run: |
-          mkdir -p app/libs
-
-          gh release download 2.15.0 \
-            --repo heiher/hev-socks5-tunnel \
-            --pattern "hev-socks5-tunnel.aar" \
-            --dir app/libs \
-            --clobber
-
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Verify native artifacts
-        working-directory: extracted/WeirdNet
-        run: |
-          test -s app/libs/libv2ray.aar
-          test -s app/libs/hev-socks5-tunnel.aar
-
-          echo "Native AAR files:"
-          ls -lh app/libs/*.aar
-
-      - name: Make Gradle wrapper executable
-        working-directory: extracted/WeirdNet
-        run: chmod +x gradlew
-
-      - name: Clean and run unit tests
-        working-directory: extracted/WeirdNet
-        run: |
-          ./gradlew --no-daemon clean :app:testDebugUnitTest
-
-      - name: Assemble debug APK
-        working-directory: extracted/WeirdNet
-        run: |
-          ./gradlew --no-daemon :app:assembleDebug
+          echo "APK successfully built:"
+          ls -lh "${APK_PATH}"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
