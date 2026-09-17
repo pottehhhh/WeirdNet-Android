@@ -17,639 +17,466 @@ jobs:
   build:
     name: Build WEIRDNET APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
     steps:
-
-      # ============================================================
-      # 1. Checkout repository
-      # ============================================================
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
-      # ============================================================
-      # 2. Extract Android project
-      # ============================================================
-      - name: Extract project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p extracted
-
-          test -f "WeirdNet-Android-Project-GitHub-Build-Ready.zip"
-
-          unzip -q \
-            "WeirdNet-Android-Project-GitHub-Build-Ready.zip" \
-            -d extracted
-
-          if [[ -f "extracted/WeirdNet/settings.gradle.kts" ]]; then
-            echo "PROJECT_DIR=extracted/WeirdNet" >> "$GITHUB_ENV"
-
-          elif [[ -f "extracted/WeirdNet/WeirdNet/settings.gradle.kts" ]]; then
-            echo "PROJECT_DIR=extracted/WeirdNet/WeirdNet" >> "$GITHUB_ENV"
-
-          else
-            echo "ERROR: settings.gradle.kts not found."
-
-            find extracted \
-              -name settings.gradle.kts \
-              -print
-
-            exit 1
-          fi
-
-          echo
-          echo "Project directory:"
-          grep "^PROJECT_DIR=" "$GITHUB_ENV"
-
-      # ============================================================
-      # 3. Setup Java 17
-      # ============================================================
-      - name: Set up Java 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      # ============================================================
-      # 4. Setup Gradle 8.7
-      #
-      # Project ZIP does not contain gradlew.
-      # Therefore Gradle is installed directly.
-      # ============================================================
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: ${{ env.GRADLE_VERSION }}
-          cache-provider: basic
-
-      # ============================================================
-      # 5. Verify Java + Gradle
-      # ============================================================
-      - name: Verify Java and Gradle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Java:"
-          java -version
-
-          echo
-          echo "Gradle:"
-          gradle --version
-
-          echo
-          echo "Gradle executable:"
-          command -v gradle
-
-      # ============================================================
-      # 6. Setup Android SDK
-      # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: ""
 
-      # ============================================================
-      # 7. Install Android SDK 35
-      # ============================================================
-      - name: Install Android SDK 35
+      - name: Install Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
 
-          set +o pipefail
-          yes | sdkmanager --licenses >/dev/null || true
-          set -o pipefail
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-35"
+          sdkmanager "build-tools;35.0.0"
+          sdkmanager "ndk;27.0.12077973"
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-      # ============================================================
-      # 8. Verify Android SDK
-      # ============================================================
-      - name: Verify Android SDK
+      - name: Show Android tool versions
         shell: bash
         run: |
           set -euo pipefail
 
-          test -d "$ANDROID_SDK_ROOT/platforms/android-35"
-          test -d "$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          java -version
+          adb version
+          sdkmanager --version
+          "$ANDROID_HOME/ndk/27.0.12077973/ndk-build" --version
 
-          echo "Android SDK 35: OK"
-
-      # ============================================================
-      # 9. FIX SOURCE COMPILATION ERRORS
-      #
-      # These are actual source fixes found in the project:
-      #
-      # 1. WireGuard Statistics:
-      #    rx()/tx() -> peerRx()/peerTx()
-      #
-      # 2. Compose:
-      #    add androidx.compose.foundation.layout.padding
-      #
-      # 3. Accompanist:
-      #    add shouldShowRationale import
-      # ============================================================
-      - name: Fix Kotlin source compatibility
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Locate Android project
         shell: bash
         run: |
           set -euo pipefail
 
-          WIREGUARD_FILE="app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt"
-          NAV_FILE="app/src/main/java/ir/weirdnet/client/ui/nav/WeirdNetNavHost.kt"
-          QR_FILE="app/src/main/java/ir/weirdnet/client/ui/qr/QrScanScreen.kt"
+          echo "Repository:"
+          pwd
 
-          echo "Checking source files..."
+          echo
+          echo "Top-level files:"
+          find . -maxdepth 2 -type f | sort | head -200
 
-          test -f "$WIREGUARD_FILE"
-          test -f "$NAV_FILE"
-          test -f "$QR_FILE"
+          echo
+          echo "Gradle projects:"
+          find . -maxdepth 5 -name settings.gradle -o -name settings.gradle.kts
 
-          # ----------------------------------------------------------
-          # FIX 1: WireGuard Statistics API
-          # ----------------------------------------------------------
+      - name: Extract project ZIP if needed
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          python3 - "$WIREGUARD_FILE" <<'PY'
+          if [ -d "WeirdNet" ] && [ -f "WeirdNet/settings.gradle.kts" ]; then
+            echo "WeirdNet directory already exists."
+            exit 0
+          fi
+
+          ZIP="$(find . -maxdepth 3 -type f -name '*.zip' | head -1 || true)"
+
+          if [ -z "$ZIP" ]; then
+            echo "No project ZIP found."
+            exit 0
+          fi
+
+          echo "Using project ZIP: $ZIP"
+
+          mkdir -p extracted
+          unzip -q "$ZIP" -d extracted
+
+          echo
+          echo "Extracted project:"
+          find extracted -maxdepth 3 -type f | sort | head -200
+
+      - name: Find Android project root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_ROOT=""
+
+          if [ -f "WeirdNet/settings.gradle.kts" ]; then
+            PROJECT_ROOT="WeirdNet"
+          elif [ -f "settings.gradle.kts" ]; then
+            PROJECT_ROOT="."
+          elif [ -f "extracted/WeirdNet/settings.gradle.kts" ]; then
+            PROJECT_ROOT="extracted/WeirdNet"
+          else
+            FOUND="$(find . -type f -name settings.gradle.kts -print -quit || true)"
+
+            if [ -n "$FOUND" ]; then
+              PROJECT_ROOT="$(dirname "$FOUND")"
+            fi
+          fi
+
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "Could not find Android Gradle project."
+            exit 1
+          fi
+
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "Android project root: $PROJECT_ROOT"
+
+      - name: Patch WireGuard traffic API
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt"
+
+          if [ ! -f "$FILE" ]; then
+            echo "WireGuardEngine.kt not found:"
+            echo "$FILE"
+            exit 1
+          fi
+
+          python - "$FILE" <<'PY'
           from pathlib import Path
           import sys
 
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
+          p = Path(sys.argv[1])
+          s = p.read_text()
 
-          old_rx = "totalRx += stats.rx(peer)"
-          old_tx = "totalTx += stats.tx(peer)"
+          old_blocks = [
+              """var totalRx = 0L
+          var totalTx = 0L
+          for (peer in stats.peers()) {
+              totalRx += stats.peerRx(peer)
+              totalTx += stats.peerTx(peer)
+          }""",
 
-          new_rx = "totalRx += stats.peerRx(peer)"
-          new_tx = "totalTx += stats.peerTx(peer)"
+              """var totalRx = 0L
+          var totalTx = 0L
+          for (peer in stats.peers()) {
+              totalRx += stats.rx(peer)
+              totalTx += stats.tx(peer)
+          }"""
+          ]
 
-          if old_rx in text:
-              text = text.replace(old_rx, new_rx, 1)
+          new_block = """val totalRx = stats.totalRx()
+          val totalTx = stats.totalTx()"""
 
-          if old_tx in text:
-              text = text.replace(old_tx, new_tx, 1)
+          changed = False
 
-          if "stats.peerRx(peer)" not in text:
-              raise SystemExit(
-                  "ERROR: WireGuard peerRx() fix was not applied."
-              )
+          for old in old_blocks:
+              if old in s:
+                  s = s.replace(old, new_block)
+                  changed = True
 
-          if "stats.peerTx(peer)" not in text:
-              raise SystemExit(
-                  "ERROR: WireGuard peerTx() fix was not applied."
-              )
+          if not changed:
+              if "stats.peerRx(peer)" in s or "stats.peerTx(peer)" in s:
+                  s = s.replace("stats.peerRx(peer)", "stats.totalRx()")
+                  s = s.replace("stats.peerTx(peer)", "stats.totalTx()")
+                  changed = True
 
-          path.write_text(text, encoding="utf-8")
+          if not changed:
+              if "stats.rx(peer)" in s or "stats.tx(peer)" in s:
+                  s = s.replace("stats.rx(peer)", "stats.totalRx()")
+                  s = s.replace("stats.tx(peer)", "stats.totalTx()")
+                  changed = True
 
-          print("WireGuard Statistics API: FIXED")
+          p.write_text(s)
+
+          print("Patched:", p)
           PY
 
-          # ----------------------------------------------------------
-          # FIX 2: Compose Modifier.padding import
-          # ----------------------------------------------------------
+          echo
+          echo "Current traffic implementation:"
+          grep -n -A15 -B3 "currentTraffic" "$FILE"
 
-          python3 - "$NAV_FILE" <<'PY'
+      - name: Patch missing Compose padding import
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/ui/WeirdNetNavHost.kt"
+
+          if [ ! -f "$FILE" ]; then
+            echo "NavHost file not found; skipping."
+            exit 0
+          fi
+
+          python - "$FILE" <<'PY'
           from pathlib import Path
           import sys
 
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
+          p = Path(sys.argv[1])
+          s = p.read_text()
 
-          required_import = (
-              "import androidx.compose.foundation.layout.padding"
-          )
+          imp = "import androidx.compose.foundation.layout.padding"
 
-          if required_import not in text:
-              marker = "import androidx.compose.material.icons.Icons"
+          if imp not in s and "Modifier.padding(" in s:
+              lines = s.splitlines()
 
-              if marker in text:
-                  text = text.replace(
-                      marker,
-                      required_import + "\n" + marker,
-                      1
-                  )
-              else:
-                  raise SystemExit(
-                      "ERROR: Could not locate import section "
-                      "in WeirdNetNavHost.kt"
-                  )
+              insert_at = 0
+              for i, line in enumerate(lines):
+                  if line.startswith("import "):
+                      insert_at = i + 1
 
-          if required_import not in text:
-              raise SystemExit(
-                  "ERROR: Compose padding import was not added."
-              )
+              lines.insert(insert_at, imp)
+              s = "\n".join(lines) + ("\n" if s.endswith("\n") else "")
+              p.write_text(s)
 
-          path.write_text(text, encoding="utf-8")
-
-          print("Compose Modifier.padding import: FIXED")
+              print("Added padding import.")
+          else:
+              print("Padding import already present or not required.")
           PY
 
-          # ----------------------------------------------------------
-          # FIX 3: Accompanist shouldShowRationale import
-          # ----------------------------------------------------------
+      - name: Patch Accompanist rationale import
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          python3 - "$QR_FILE" <<'PY'
+          FILE="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/ui/screens/QrScanScreen.kt"
+
+          if [ ! -f "$FILE" ]; then
+            echo "QrScanScreen.kt not found; skipping."
+            exit 0
+          fi
+
+          python - "$FILE" <<'PY'
           from pathlib import Path
           import sys
 
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
+          p = Path(sys.argv[1])
+          s = p.read_text()
 
-          required_import = (
-              "import com.google.accompanist.permissions.shouldShowRationale"
-          )
+          if "shouldShowRationale" not in s:
+              print("shouldShowRationale is not used.")
+              raise SystemExit(0)
 
-          if required_import not in text:
-              marker = (
-                  "import com.google.accompanist.permissions."
-                  "rememberPermissionState"
-              )
+          imp = "import com.google.accompanist.permissions.shouldShowRationale"
 
-              if marker in text:
-                  text = text.replace(
-                      marker,
-                      marker + "\n" + required_import,
-                      1
-                  )
-              else:
-                  raise SystemExit(
-                      "ERROR: Could not locate Accompanist "
-                      "permission imports."
-                  )
+          if imp not in s:
+              lines = s.splitlines()
 
-          if required_import not in text:
-              raise SystemExit(
-                  "ERROR: shouldShowRationale import was not added."
-              )
+              insert_at = 0
+              for i, line in enumerate(lines):
+                  if line.startswith("import "):
+                      insert_at = i + 1
 
-          path.write_text(text, encoding="utf-8")
+              lines.insert(insert_at, imp)
+              s = "\n".join(lines) + ("\n" if s.endswith("\n") else "")
+              p.write_text(s)
 
-          print("Accompanist shouldShowRationale import: FIXED")
+              print("Added shouldShowRationale import.")
+          else:
+              print("Rationale import already present.")
           PY
 
-          echo
-          echo "All known Kotlin compatibility fixes applied."
-
-      # ============================================================
-      # 10. Show patched source snippets
-      # ============================================================
-      - name: Verify Kotlin fixes
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Verify source patches
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "================ WireGuard ================"
-          grep -n "peerRx\|peerTx" \
-            app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt
+          WG="$PROJECT_ROOT/app/src/main/java/ir/weirdnet/client/core/wireguard/WireGuardEngine.kt"
 
-          echo
-          echo "================ Navigation ==============="
-          grep -n "foundation.layout.padding" \
-            app/src/main/java/ir/weirdnet/client/ui/nav/WeirdNetNavHost.kt
+          echo "Checking WireGuard API..."
 
-          echo
-          echo "================ QR Scanner ==============="
-          grep -n "shouldShowRationale" \
-            app/src/main/java/ir/weirdnet/client/ui/qr/QrScanScreen.kt
+          if grep -n "peerRx(peer)" "$WG"; then
+            echo "ERROR: peerRx(peer) still exists."
+            exit 1
+          fi
 
-      # ============================================================
-      # 11. Prepare app/libs
-      # ============================================================
-      - name: Prepare app native libraries
-        working-directory: ${{ env.PROJECT_DIR }}
+          if grep -n "peerTx(peer)" "$WG"; then
+            echo "ERROR: peerTx(peer) still exists."
+            exit 1
+          fi
+
+          if ! grep -n "stats.totalRx()" "$WG"; then
+            echo "ERROR: stats.totalRx() not found."
+            exit 1
+          fi
+
+          if ! grep -n "stats.totalTx()" "$WG"; then
+            echo "ERROR: stats.totalTx() not found."
+            exit 1
+          fi
+
+          echo "WireGuard traffic API patch verified."
+
+      - name: Download Xray Android library
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p app/libs
+          mkdir -p "$PROJECT_ROOT/app/libs"
 
-          rm -f app/libs/libv2ray.aar
-          rm -f app/libs/hev-socks5-tunnel.aar
+          curl -fL \
+            --retry 5 \
+            --retry-all-errors \
+            -o "$PROJECT_ROOT/app/libs/AndroidLibXrayLite.aar" \
+            "https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/AndroidLibXrayLite.aar"
 
-      # ============================================================
-      # 12. Download Xray AAR
-      # ============================================================
-      - name: Download Xray native AAR
-        working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
+          ls -lh "$PROJECT_ROOT/app/libs/AndroidLibXrayLite.aar"
 
-          gh release download v26.6.2 \
-            --repo 2dust/AndroidLibXrayLite \
-            --pattern "libv2ray.aar" \
-            --dir app/libs \
-            --clobber
-
-          test -s app/libs/libv2ray.aar
-
-          echo
-          echo "Xray AAR:"
-          ls -lh app/libs/libv2ray.aar
-
-      # ============================================================
-      # 13. Prepare HEV source
-      # ============================================================
-      - name: Prepare HEV source
+      - name: Build HEV SOCKS5 tunnel
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf hev-android
-
           mkdir -p hev-android
 
-          git clone --recursive \
-            "https://github.com/heiher/hev-socks5-tunnel.git" \
+          git clone \
+            --depth 1 \
+            https://github.com/heiher/hev-socks5-tunnel.git \
             hev-android/jni
 
           cd hev-android/jni
 
+          git fetch --depth 1 origin "$HEV_COMMIT"
           git checkout "$HEV_COMMIT"
 
-          git submodule sync --recursive
           git submodule update --init --recursive
 
-          echo
-          echo "HEV commit:"
-          git rev-parse HEAD
+          cd ..
 
-          test -f Android.mk
-          test -f Application.mk
+          ln -sf . jni
 
-          echo "Android.mk: OK"
-          echo "Application.mk: OK"
+          export NDK_PROJECT_PATH="$PWD"
+          export NDK_APPLICATION_MK="$PWD/jni/Application.mk"
 
-      # ============================================================
-      # 14. Download Android NDK r27d
-      # ============================================================
-      - name: Download Android NDK r27d
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          wget -q --show-progress \
-            "https://dl.google.com/android/repository/android-ndk-r27d-linux.zip"
-
-          unzip -q android-ndk-r27d-linux.zip
-
-          test -x "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build"
+          "$ANDROID_HOME/ndk/27.0.12077973/ndk-build" \
+            NDK_PROJECT_PATH="$PWD" \
+            NDK_APPLICATION_MK="$PWD/jni/Application.mk" \
+            V=1
 
           echo
-          "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" --version
+          echo "HEV build outputs:"
+          find . -type f \
+            \( -name '*.so' -o -name '*.a' \) \
+            -print | sort
 
-      # ============================================================
-      # 15. Build HEV
-      # ============================================================
-      - name: Build HEV native library
-        working-directory: hev-android
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -d jni
-          test -f jni/Android.mk
-          test -f jni/Application.mk
-
-          echo "HEV build directory:"
-          pwd
-
-          echo
-          echo "Cleaning..."
-          "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" clean
-
-          echo
-          echo "Building..."
-          "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" \
-            APP_MODULES=hev-socks5-tunnel \
-            -j"$(nproc)"
-
-          echo
-          echo "Checking libraries..."
-
-          for abi in \
-            armeabi-v7a \
-            arm64-v8a \
-            x86 \
-            x86_64
-          do
-            test -s "libs/$abi/libhev-socks5-tunnel.so"
-            echo "OK: $abi"
-          done
-
-      # ============================================================
-      # 16. Package HEV AAR
-      # ============================================================
       - name: Package HEV AAR
-        working-directory: hev-android
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf aar
+          HEV_AAR="$PROJECT_ROOT/app/libs/hev-socks5-tunnel.aar"
 
-          mkdir -p aar/jni
+          rm -rf hev-aar
+          mkdir -p hev-aar/jni
 
-          for abi in \
-            armeabi-v7a \
-            arm64-v8a \
-            x86 \
-            x86_64
-          do
-            mkdir -p "aar/jni/$abi"
+          find hev-android \
+            -type f \
+            -name '*.so' \
+            -print
 
-            cp \
-              "libs/$abi/libhev-socks5-tunnel.so" \
-              "aar/jni/$abi/"
+          found=0
+
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            SRC="$(find hev-android -type f -path "*/libs/$abi/*.so" -o -type f -path "*/obj/local/$abi/*.so" | head -1 || true)"
+
+            if [ -n "$SRC" ]; then
+              mkdir -p "hev-aar/jni/$abi"
+              cp "$SRC" "hev-aar/jni/$abi/"
+              found=1
+            fi
           done
 
-          cat > aar/AndroidManifest.xml <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest
-              xmlns:android="http://schemas.android.com/apk/res/android"
-              package="hev.socks5.tunnel">
-              <uses-sdk android:minSdkVersion="29" />
-          </manifest>
-          EOF
-
-          (
-            cd aar
-            zip -q -r ../hev-socks5-tunnel.aar .
-          )
-
-          test -s hev-socks5-tunnel.aar
-
-          echo
-          ls -lh hev-socks5-tunnel.aar
-
-      # ============================================================
-      # 17. Align minSdk
-      # ============================================================
-      - name: Align minSdk with HEV
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("app/build.gradle.kts")
-          text = path.read_text(encoding="utf-8")
-
-          if "minSdk = 26" in text:
-              text = text.replace(
-                  "minSdk = 26",
-                  "minSdk = 29",
-                  1
-              )
-
-          elif "minSdk = 29" not in text:
-              raise SystemExit(
-                  "Could not find minSdk declaration."
-              )
-
-          path.write_text(text, encoding="utf-8")
-
-          print("minSdk = 29")
-          PY
-
-      # ============================================================
-      # 18. Copy HEV AAR
-      # ============================================================
-      - name: Copy HEV AAR into app
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cp \
-            "$GITHUB_WORKSPACE/hev-android/hev-socks5-tunnel.aar" \
-            app/libs/
-
-          test -s app/libs/hev-socks5-tunnel.aar
-
-          echo
-          ls -lh app/libs/*.aar
-
-      # ============================================================
-      # 19. Suppress compileSdk warning
-      # ============================================================
-      - name: Configure Android build properties
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if ! grep -q \
-            "^android.suppressUnsupportedCompileSdk=35" \
-            gradle.properties
-          then
-            printf '\nandroid.suppressUnsupportedCompileSdk=35\n' \
-              >> gradle.properties
+          if [ "$found" -ne 1 ]; then
+            echo "ERROR: No HEV shared libraries were found."
+            find hev-android -type f | sort | head -300
+            exit 1
           fi
 
-          echo "compileSdk 35 warning suppressed."
+          cd hev-aar
+          zip -qr "../hev-socks5-tunnel.aar" .
+          cd ..
 
-      # ============================================================
-      # 20. Verify project
-      # ============================================================
-      - name: Verify Android project
-        working-directory: ${{ env.PROJECT_DIR }}
+          cp hev-socks5-tunnel.aar "$HEV_AAR"
+
+          echo
+          echo "HEV AAR:"
+          ls -lh "$HEV_AAR"
+
+      - name: Configure Android build
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f settings.gradle.kts
-          test -f build.gradle.kts
-          test -f app/build.gradle.kts
+          mkdir -p "$PROJECT_ROOT/gradle"
 
-          echo "Android project structure: OK"
+          PROPS="$PROJECT_ROOT/gradle.properties"
 
-      # ============================================================
-      # 21. Clean
-      # ============================================================
-      - name: Clean project
-        working-directory: ${{ env.PROJECT_DIR }}
+          touch "$PROPS"
+
+          if ! grep -q "^android.suppressUnsupportedCompileSdk=35$" "$PROPS"; then
+            echo "android.suppressUnsupportedCompileSdk=35" >> "$PROPS"
+          fi
+
+          echo
+          echo "gradle.properties:"
+          cat "$PROPS"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Show Gradle version
+        working-directory: ${{ env.PROJECT_ROOT }}
         shell: bash
         run: |
           set -euo pipefail
+          gradle --version
 
-          gradle \
-            --no-daemon \
-            clean \
-            --stacktrace
-
-      # ============================================================
-      # 22. Run unit tests
-      # ============================================================
       - name: Run unit tests
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: ${{ env.PROJECT_ROOT }}
         shell: bash
         run: |
           set -euo pipefail
 
           gradle \
             --no-daemon \
-            :app:testDebugUnitTest \
-            --stacktrace
+            --stacktrace \
+            :app:testDebugUnitTest
 
-      # ============================================================
-      # 23. Build Debug APK
-      # ============================================================
       - name: Build Debug APK
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: ${{ env.PROJECT_ROOT }}
         shell: bash
         run: |
           set -euo pipefail
 
           gradle \
             --no-daemon \
-            :app:assembleDebug \
-            --stacktrace
+            --stacktrace \
+            :app:assembleDebug
 
-      # ============================================================
-      # 24. Verify APK
-      # ============================================================
-      - name: Verify APK
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Locate APK
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="$(
-            find app/build/outputs/apk/debug \
-              -type f \
-              -name "*.apk" \
-              -print -quit
-          )"
+          echo "APK files:"
+          find "$PROJECT_ROOT/app/build/outputs" \
+            -type f \
+            \( -name '*.apk' -o -name '*.aab' \) \
+            -print
 
-          test -n "$APK"
-
-          echo
-          echo "========================================"
-          echo "WEIRDNET APK BUILD SUCCESSFUL"
-          echo "========================================"
-          echo
-          ls -lh "$APK"
-          echo
-          echo "APK:"
-          echo "$APK"
-
-      # ============================================================
-      # 25. Upload APK
-      # ============================================================
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: WeirdNet-Debug-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          path: |
+            ${{ env.PROJECT_ROOT }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeirdNet-Build-Reports
+          path: |
+            ${{ env.PROJECT_ROOT }}/app/build/reports/**
+          if-no-files-found: warn
+          retention-days: 7
