@@ -1,0 +1,98 @@
+name: WEIRDNET Android Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+
+jobs:
+  build-debug:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract main project
+        run: |
+          unzip -q "WeirdNet-Android-Project-GitHub-Build-Ready.zip" -d extracted
+
+          test -f "extracted/WeirdNet/settings.gradle.kts"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        run: |
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-35"
+          sdkmanager "build-tools;35.0.0"
+          yes | sdkmanager --licenses >/dev/null || true
+
+      - name: Download pinned Xray native AAR
+        working-directory: extracted/WeirdNet
+        run: |
+          mkdir -p app/libs
+
+          gh release download v26.6.2 \
+            --repo 2dust/AndroidLibXrayLite \
+            --pattern "libv2ray.aar" \
+            --dir app/libs \
+            --clobber
+
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Download pinned HEV native AAR
+        working-directory: extracted/WeirdNet
+        run: |
+          mkdir -p app/libs
+
+          gh release download 2.15.0 \
+            --repo heiher/hev-socks5-tunnel \
+            --pattern "hev-socks5-tunnel.aar" \
+            --dir app/libs \
+            --clobber
+
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Verify native artifacts
+        working-directory: extracted/WeirdNet
+        run: |
+          test -s app/libs/libv2ray.aar
+          test -s app/libs/hev-socks5-tunnel.aar
+
+          echo "Native AAR files:"
+          ls -lh app/libs/*.aar
+
+      - name: Make Gradle wrapper executable
+        working-directory: extracted/WeirdNet
+        run: chmod +x gradlew
+
+      - name: Clean and run unit tests
+        working-directory: extracted/WeirdNet
+        run: |
+          ./gradlew --no-daemon clean :app:testDebugUnitTest
+
+      - name: Assemble debug APK
+        working-directory: extracted/WeirdNet
+        run: |
+          ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: weirdnet-debug-apk
+          path: extracted/WeirdNet/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
