@@ -16,33 +16,48 @@ jobs:
   build:
     name: Build WEIRDNET APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
+      # ------------------------------------------------------------
+      # 1. Checkout GitHub repository
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      # ------------------------------------------------------------
+      # 2. Extract Android project from ZIP
+      # ------------------------------------------------------------
       - name: Extract project
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p extracted
+
           unzip -q "WeirdNet-Android-Project-GitHub-Build-Ready.zip" -d extracted
 
           if [[ -f "extracted/WeirdNet/settings.gradle.kts" ]]; then
             echo "PROJECT_DIR=extracted/WeirdNet" >> "$GITHUB_ENV"
+
           elif [[ -f "extracted/WeirdNet/WeirdNet/settings.gradle.kts" ]]; then
             echo "PROJECT_DIR=extracted/WeirdNet/WeirdNet" >> "$GITHUB_ENV"
+
           else
-            echo "ERROR: settings.gradle.kts not found"
+            echo "ERROR: settings.gradle.kts not found."
+            echo
+            echo "Available settings.gradle.kts files:"
             find extracted -name settings.gradle.kts -print
             exit 1
           fi
 
+          echo
           echo "Project directory:"
           grep "^PROJECT_DIR=" "$GITHUB_ENV"
 
+      # ------------------------------------------------------------
+      # 3. Java
+      # ------------------------------------------------------------
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
@@ -50,6 +65,9 @@ jobs:
           java-version: "17"
           cache: gradle
 
+      # ------------------------------------------------------------
+      # 4. Android SDK
+      # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
@@ -91,9 +109,10 @@ jobs:
           test -d "$ANDROID_SDK_ROOT/build-tools/35.0.0"
 
           echo "Android SDK 35 is installed."
-          ls -ld "$ANDROID_SDK_ROOT/platforms/android-35"
-          ls -ld "$ANDROID_SDK_ROOT/build-tools/35.0.0"
 
+      # ------------------------------------------------------------
+      # 5. Prepare app/libs
+      # ------------------------------------------------------------
       - name: Prepare app native libraries directory
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -105,6 +124,9 @@ jobs:
           rm -f app/libs/libv2ray.aar
           rm -f app/libs/hev-socks5-tunnel.aar
 
+      # ------------------------------------------------------------
+      # 6. Download Xray AAR
+      # ------------------------------------------------------------
       - name: Download Xray native AAR
         working-directory: ${{ env.PROJECT_DIR }}
         env:
@@ -121,28 +143,52 @@ jobs:
 
           test -s app/libs/libv2ray.aar
 
+          echo
           echo "Xray AAR:"
           ls -lh app/libs/libv2ray.aar
 
-      - name: Clone HEV source
+      # ------------------------------------------------------------
+      # 7. Prepare HEV Android build directory
+      #
+      # IMPORTANT:
+      # ndk-build must run from a parent application directory
+      # containing the HEV source inside jni/
+      # ------------------------------------------------------------
+      - name: Prepare HEV source for Android NDK
         shell: bash
         run: |
           set -euo pipefail
 
+          rm -rf hev-android
+
+          mkdir -p hev-android
+
           git clone --recursive \
             "https://github.com/heiher/hev-socks5-tunnel.git" \
-            hev-src
+            hev-android/jni
 
-          cd hev-src
+          cd hev-android/jni
 
           git checkout "$HEV_COMMIT"
 
           git submodule sync --recursive
           git submodule update --init --recursive
 
+          echo
           echo "HEV commit:"
           git rev-parse HEAD
 
+          echo
+          echo "HEV Android project files:"
+          test -f Android.mk
+          test -f Application.mk
+
+          echo "Android.mk found"
+          echo "Application.mk found"
+
+      # ------------------------------------------------------------
+      # 8. Download Android NDK r27d
+      # ------------------------------------------------------------
       - name: Download Android NDK r27d
         shell: bash
         run: |
@@ -155,21 +201,40 @@ jobs:
 
           test -x "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build"
 
+          echo
           echo "NDK ready:"
           "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" --version
 
+      # ------------------------------------------------------------
+      # 9. Build HEV native library
+      #
+      # ndk-build is intentionally executed from hev-android,
+      # NOT from hev-android/jni.
+      # ------------------------------------------------------------
       - name: Build HEV native library
-        working-directory: hev-src
+        working-directory: hev-android
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Current directory:"
+          pwd
+
+          echo
+          echo "JNI source directory:"
+          ls -la jni
+
+          echo
+          echo "Cleaning previous HEV build..."
           "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" clean
 
+          echo
+          echo "Building HEV..."
           "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" \
             APP_MODULES=hev-socks5-tunnel \
             -j"$(nproc)"
 
+          echo
           echo "Checking generated native libraries..."
 
           for abi in \
@@ -182,13 +247,21 @@ jobs:
             echo "OK: libs/$abi/libhev-socks5-tunnel.so"
           done
 
+          echo
+          echo "Generated HEV libraries:"
+          find libs -type f -name "libhev-socks5-tunnel.so" -print
+
+      # ------------------------------------------------------------
+      # 10. Package HEV into AAR
+      # ------------------------------------------------------------
       - name: Package HEV AAR
-        working-directory: hev-src
+        working-directory: hev-android
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf aar
+
           mkdir -p aar/jni
 
           for abi in \
@@ -220,9 +293,13 @@ jobs:
 
           test -s hev-socks5-tunnel.aar
 
+          echo
           echo "HEV AAR created:"
           ls -lh hev-socks5-tunnel.aar
 
+      # ------------------------------------------------------------
+      # 11. Align CI minSdk with HEV
+      # ------------------------------------------------------------
       - name: Align CI minSdk with HEV
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -237,6 +314,7 @@ jobs:
 
           if "minSdk = 26" in text:
               text = text.replace("minSdk = 26", "minSdk = 29", 1)
+
           elif "minSdk = 29" not in text:
               raise SystemExit(
                   "Could not find the expected minSdk declaration "
@@ -248,8 +326,13 @@ jobs:
           print("CI build minSdk is now 29")
           PY
 
+          echo
+          echo "Current minSdk:"
           grep -n "minSdk" app/build.gradle.kts
 
+      # ------------------------------------------------------------
+      # 12. Copy HEV AAR into Android project
+      # ------------------------------------------------------------
       - name: Copy HEV AAR into app
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -257,77 +340,123 @@ jobs:
           set -euo pipefail
 
           cp \
-            "$GITHUB_WORKSPACE/hev-src/hev-socks5-tunnel.aar" \
+            "$GITHUB_WORKSPACE/hev-android/hev-socks5-tunnel.aar" \
             app/libs/
 
           test -s app/libs/hev-socks5-tunnel.aar
 
-          echo "Native libraries available to Gradle:"
+          echo
+          echo "Native AARs available to Gradle:"
           ls -lh app/libs/*.aar
 
+      # ------------------------------------------------------------
+      # 13. Verify AAR contents
+      # ------------------------------------------------------------
       - name: Verify AAR contents
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          unzip -l app/libs/libv2ray.aar | head -40
-          echo
-          unzip -l app/libs/hev-socks5-tunnel.aar | head -40
+          echo "================ Xray AAR ================"
+          unzip -l app/libs/libv2ray.aar | head -60
 
+          echo
+          echo "================ HEV AAR ================="
+          unzip -l app/libs/hev-socks5-tunnel.aar | head -60
+
+      # ------------------------------------------------------------
+      # 14. Gradle wrapper
+      # ------------------------------------------------------------
       - name: Make Gradle wrapper executable
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
+          set -euo pipefail
           chmod +x gradlew
 
+      # ------------------------------------------------------------
+      # 15. Version information
+      # ------------------------------------------------------------
       - name: Show Java and Gradle versions
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
+          set -euo pipefail
+
+          echo "Java:"
           java -version
+
+          echo
+          echo "Gradle:"
           ./gradlew --version
 
+      # ------------------------------------------------------------
+      # 16. Clean project
+      # ------------------------------------------------------------
       - name: Clean project
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
-          ./gradlew --no-daemon clean
+          set -euo pipefail
 
+          ./gradlew \
+            --no-daemon \
+            clean
+
+      # ------------------------------------------------------------
+      # 17. Run unit tests
+      # ------------------------------------------------------------
       - name: Run unit tests
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
+          set -euo pipefail
+
           ./gradlew \
             --no-daemon \
             :app:testDebugUnitTest \
             --stacktrace
 
+      # ------------------------------------------------------------
+      # 18. Build Debug APK
+      # ------------------------------------------------------------
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
+          set -euo pipefail
+
           ./gradlew \
             --no-daemon \
             :app:assembleDebug \
             --stacktrace
 
+      # ------------------------------------------------------------
+      # 19. Verify APK
+      # ------------------------------------------------------------
       - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="$(find app/build/outputs/apk/debug \
-            -type f \
-            -name '*.apk' \
-            -print -quit)"
+          APK="$(
+            find app/build/outputs/apk/debug \
+              -type f \
+              -name "*.apk" \
+              -print -quit
+          )"
 
           test -n "$APK"
 
+          echo
           echo "APK generated successfully:"
           ls -lh "$APK"
 
+      # ------------------------------------------------------------
+      # 20. Upload APK as GitHub Actions artifact
+      # ------------------------------------------------------------
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
