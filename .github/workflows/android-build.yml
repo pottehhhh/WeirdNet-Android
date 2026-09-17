@@ -11,23 +11,24 @@ permissions:
 
 env:
   HEV_COMMIT: 941c758101385d145c66210ac88991daaf27d4b6
+  GRADLE_VERSION: "8.7"
 
 jobs:
   build:
     name: Build WEIRDNET APK
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
-      # ------------------------------------------------------------
-      # 1. Checkout GitHub repository
-      # ------------------------------------------------------------
+      # ============================================================
+      # 1. Checkout repository
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # ------------------------------------------------------------
+      # ============================================================
       # 2. Extract Android project from ZIP
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Extract project
         shell: bash
         run: |
@@ -35,7 +36,11 @@ jobs:
 
           mkdir -p extracted
 
-          unzip -q "WeirdNet-Android-Project-GitHub-Build-Ready.zip" -d extracted
+          test -f "WeirdNet-Android-Project-GitHub-Build-Ready.zip"
+
+          unzip -q \
+            "WeirdNet-Android-Project-GitHub-Build-Ready.zip" \
+            -d extracted
 
           if [[ -f "extracted/WeirdNet/settings.gradle.kts" ]]; then
             echo "PROJECT_DIR=extracted/WeirdNet" >> "$GITHUB_ENV"
@@ -44,35 +49,71 @@ jobs:
             echo "PROJECT_DIR=extracted/WeirdNet/WeirdNet" >> "$GITHUB_ENV"
 
           else
-            echo "ERROR: settings.gradle.kts not found."
+            echo "ERROR: Could not locate settings.gradle.kts"
             echo
-            echo "Available settings.gradle.kts files:"
+            echo "Found files:"
+            find extracted -maxdepth 5 -type f | sort
+            echo
+            echo "Searching for settings.gradle.kts:"
             find extracted -name settings.gradle.kts -print
             exit 1
           fi
 
           echo
-          echo "Project directory:"
+          echo "PROJECT_DIR:"
           grep "^PROJECT_DIR=" "$GITHUB_ENV"
 
-      # ------------------------------------------------------------
-      # 3. Java
-      # ------------------------------------------------------------
+      # ============================================================
+      # 3. Setup Java 17
+      # ============================================================
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
-      # ------------------------------------------------------------
-      # 4. Android SDK
-      # ------------------------------------------------------------
+      # ============================================================
+      # 4. Setup Gradle directly
+      #
+      # The project ZIP does not contain gradlew or gradle-wrapper.jar.
+      # Therefore we intentionally install Gradle 8.7 directly.
+      # ============================================================
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-provider: basic
+
+      # ============================================================
+      # 5. Verify Java + Gradle
+      # ============================================================
+      - name: Verify Java and Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Java:"
+          java -version
+
+          echo
+          echo "Gradle:"
+          gradle --version
+
+          echo
+          echo "Gradle executable:"
+          command -v gradle
+
+      # ============================================================
+      # 6. Setup Android SDK
+      # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: ""
 
+      # ============================================================
+      # 7. Verify Android SDK
+      # ============================================================
       - name: Verify Android SDK toolchain
         shell: bash
         run: |
@@ -84,12 +125,18 @@ jobs:
           command -v sdkmanager
           sdkmanager --version
 
+      # ============================================================
+      # 8. Accept Android SDK licenses
+      # ============================================================
       - name: Accept Android SDK licenses
         shell: bash
         run: |
           set +o pipefail
           yes | sdkmanager --licenses >/dev/null || true
 
+      # ============================================================
+      # 9. Install Android SDK 35
+      # ============================================================
       - name: Install Android SDK 35
         shell: bash
         run: |
@@ -100,6 +147,9 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
+      # ============================================================
+      # 10. Verify Android SDK 35
+      # ============================================================
       - name: Verify Android SDK 35
         shell: bash
         run: |
@@ -108,11 +158,11 @@ jobs:
           test -d "$ANDROID_SDK_ROOT/platforms/android-35"
           test -d "$ANDROID_SDK_ROOT/build-tools/35.0.0"
 
-          echo "Android SDK 35 is installed."
+          echo "Android SDK 35 is installed successfully."
 
-      # ------------------------------------------------------------
-      # 5. Prepare app/libs
-      # ------------------------------------------------------------
+      # ============================================================
+      # 11. Prepare app/libs
+      # ============================================================
       - name: Prepare app native libraries directory
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -124,9 +174,11 @@ jobs:
           rm -f app/libs/libv2ray.aar
           rm -f app/libs/hev-socks5-tunnel.aar
 
-      # ------------------------------------------------------------
-      # 6. Download Xray AAR
-      # ------------------------------------------------------------
+          echo "app/libs prepared."
+
+      # ============================================================
+      # 12. Download Xray native AAR
+      # ============================================================
       - name: Download Xray native AAR
         working-directory: ${{ env.PROJECT_DIR }}
         env:
@@ -147,13 +199,19 @@ jobs:
           echo "Xray AAR:"
           ls -lh app/libs/libv2ray.aar
 
-      # ------------------------------------------------------------
-      # 7. Prepare HEV Android build directory
+      # ============================================================
+      # 13. Prepare HEV source
       #
-      # IMPORTANT:
-      # ndk-build must run from a parent application directory
-      # containing the HEV source inside jni/
-      # ------------------------------------------------------------
+      # Official HEV Android build layout:
+      #
+      # hev-android/
+      # └── jni/
+      #     ├── Android.mk
+      #     ├── Application.mk
+      #     └── ...
+      #
+      # ndk-build runs from hev-android, not hev-android/jni.
+      # ============================================================
       - name: Prepare HEV source for Android NDK
         shell: bash
         run: |
@@ -179,16 +237,17 @@ jobs:
           git rev-parse HEAD
 
           echo
-          echo "HEV Android project files:"
+          echo "Checking HEV Android build files..."
+
           test -f Android.mk
           test -f Application.mk
 
-          echo "Android.mk found"
-          echo "Application.mk found"
+          echo "Android.mk: OK"
+          echo "Application.mk: OK"
 
-      # ------------------------------------------------------------
-      # 8. Download Android NDK r27d
-      # ------------------------------------------------------------
+      # ============================================================
+      # 14. Download Android NDK r27d
+      # ============================================================
       - name: Download Android NDK r27d
         shell: bash
         run: |
@@ -202,30 +261,28 @@ jobs:
           test -x "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build"
 
           echo
-          echo "NDK ready:"
+          echo "NDK version:"
           "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" --version
 
-      # ------------------------------------------------------------
-      # 9. Build HEV native library
-      #
-      # ndk-build is intentionally executed from hev-android,
-      # NOT from hev-android/jni.
-      # ------------------------------------------------------------
+      # ============================================================
+      # 15. Build HEV native libraries
+      # ============================================================
       - name: Build HEV native library
         working-directory: hev-android
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Current directory:"
+          echo "HEV Android build directory:"
           pwd
 
           echo
-          echo "JNI source directory:"
+          echo "Checking jni directory:"
+          test -d jni
           ls -la jni
 
           echo
-          echo "Cleaning previous HEV build..."
+          echo "Cleaning HEV build..."
           "$GITHUB_WORKSPACE/android-ndk-r27d/ndk-build" clean
 
           echo
@@ -235,7 +292,7 @@ jobs:
             -j"$(nproc)"
 
           echo
-          echo "Checking generated native libraries..."
+          echo "Checking generated libraries..."
 
           for abi in \
             armeabi-v7a \
@@ -248,12 +305,15 @@ jobs:
           done
 
           echo
-          echo "Generated HEV libraries:"
-          find libs -type f -name "libhev-socks5-tunnel.so" -print
+          echo "HEV native libraries:"
+          find libs \
+            -type f \
+            -name "libhev-socks5-tunnel.so" \
+            -print
 
-      # ------------------------------------------------------------
-      # 10. Package HEV into AAR
-      # ------------------------------------------------------------
+      # ============================================================
+      # 16. Package HEV AAR
+      # ============================================================
       - name: Package HEV AAR
         working-directory: hev-android
         shell: bash
@@ -297,9 +357,9 @@ jobs:
           echo "HEV AAR created:"
           ls -lh hev-socks5-tunnel.aar
 
-      # ------------------------------------------------------------
-      # 11. Align CI minSdk with HEV
-      # ------------------------------------------------------------
+      # ============================================================
+      # 17. Align minSdk with HEV
+      # ============================================================
       - name: Align CI minSdk with HEV
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -317,22 +377,21 @@ jobs:
 
           elif "minSdk = 29" not in text:
               raise SystemExit(
-                  "Could not find the expected minSdk declaration "
+                  "Could not find expected minSdk declaration "
                   "in app/build.gradle.kts"
               )
 
           path.write_text(text, encoding="utf-8")
 
-          print("CI build minSdk is now 29")
+          print("CI minSdk is now 29")
           PY
 
           echo
-          echo "Current minSdk:"
           grep -n "minSdk" app/build.gradle.kts
 
-      # ------------------------------------------------------------
-      # 12. Copy HEV AAR into Android project
-      # ------------------------------------------------------------
+      # ============================================================
+      # 18. Copy HEV AAR into app
+      # ============================================================
       - name: Copy HEV AAR into app
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -346,12 +405,12 @@ jobs:
           test -s app/libs/hev-socks5-tunnel.aar
 
           echo
-          echo "Native AARs available to Gradle:"
+          echo "AAR files:"
           ls -lh app/libs/*.aar
 
-      # ------------------------------------------------------------
-      # 13. Verify AAR contents
-      # ------------------------------------------------------------
+      # ============================================================
+      # 19. Verify AAR contents
+      # ============================================================
       - name: Verify AAR contents
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -365,76 +424,78 @@ jobs:
           echo "================ HEV AAR ================="
           unzip -l app/libs/hev-socks5-tunnel.aar | head -60
 
-      # ------------------------------------------------------------
-      # 14. Gradle wrapper
-      # ------------------------------------------------------------
-      - name: Make Gradle wrapper executable
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x gradlew
-
-      # ------------------------------------------------------------
-      # 15. Version information
-      # ------------------------------------------------------------
-      - name: Show Java and Gradle versions
+      # ============================================================
+      # 20. Verify Android project structure
+      # ============================================================
+      - name: Verify Android project
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Java:"
-          java -version
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f app/build.gradle.kts
 
-          echo
-          echo "Gradle:"
-          ./gradlew --version
+          echo "Android project structure:"
+          find . \
+            -maxdepth 2 \
+            -type f \
+            \( \
+              -name "settings.gradle.kts" \
+              -o -name "build.gradle.kts" \
+            \) \
+            -print
 
-      # ------------------------------------------------------------
-      # 16. Clean project
-      # ------------------------------------------------------------
+      # ============================================================
+      # 21. Clean Gradle project
+      #
+      # IMPORTANT:
+      # No ./gradlew here.
+      # We use the Gradle 8.7 executable installed above.
+      # ============================================================
       - name: Clean project
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          ./gradlew \
+          gradle \
             --no-daemon \
-            clean
+            clean \
+            --stacktrace
 
-      # ------------------------------------------------------------
-      # 17. Run unit tests
-      # ------------------------------------------------------------
+      # ============================================================
+      # 22. Run unit tests
+      # ============================================================
       - name: Run unit tests
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          ./gradlew \
+          gradle \
             --no-daemon \
             :app:testDebugUnitTest \
             --stacktrace
 
-      # ------------------------------------------------------------
-      # 18. Build Debug APK
-      # ------------------------------------------------------------
+      # ============================================================
+      # 23. Build Debug APK
+      # ============================================================
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          ./gradlew \
+          gradle \
             --no-daemon \
             :app:assembleDebug \
             --stacktrace
 
-      # ------------------------------------------------------------
-      # 19. Verify APK
-      # ------------------------------------------------------------
+      # ============================================================
+      # 24. Verify APK
+      # ============================================================
       - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -454,9 +515,13 @@ jobs:
           echo "APK generated successfully:"
           ls -lh "$APK"
 
-      # ------------------------------------------------------------
-      # 20. Upload APK as GitHub Actions artifact
-      # ------------------------------------------------------------
+          echo
+          echo "APK path:"
+          echo "$APK"
+
+      # ============================================================
+      # 25. Upload APK artifact
+      # ============================================================
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
